@@ -48,10 +48,14 @@ fi
 if [ "${MACHINE_TYPE}" != "aarch64" ] ; then
     export CROSS_COMPILE=aarch64-linux-gnu-
     if [ $(compgen -c $CROSS_COMPILE | wc -l) -eq 0 ] ; then
-        echo "Missing cross compiler."
-        echo "download the toolchain from http://releases.linaro.org/components/toolchain/binaries/4.9-2016.02/aarch64-linux-gnu/gcc-linaro-4.9-2016.02-x86_64_aarch64-linux-gnu.tar.xz"
-        echo "and then set up the PATH according to the README"
-        exit 1
+        if [ -d /usr/src/gcc-linaro-4.9-2016.02-x86_64_aarch64-linux-gnu/bin ]; then
+            export PATH=${PATH}:/usr/src/gcc-linaro-4.9-2016.02-x86_64_aarch64-linux-gnu/bin
+        else
+            echo "Missing cross compiler."
+            echo "download the toolchain from http://releases.linaro.org/components/toolchain/binaries/4.9-2016.02/aarch64-linux-gnu/gcc-linaro-4.9-2016.02-x86_64_aarch64-linux-gnu.tar.xz"
+            echo "extract it to /usr/src, and then set up the PATH according to the README"
+            exit 1
+        fi
     fi
     # Unset CROSS_COMPILE so that if there is any native compiling needed it doesn't
     # get cross compiled.
@@ -309,7 +313,10 @@ cp -a ${basedir}/root/usr/src/kernel ${basedir}/
 debug "building kernel"
 cd ${basedir}/kernel/
 make oldconfig
-make -j $(grep -c processor /proc/cpuinfo)
+CPUS=$(grep -c processor /proc/cpuinfo)
+make -j ${CPUS} Image
+make -j ${CPUS} modules
+make -j ${CPUS} dtbs
 make modules_install INSTALL_MOD_PATH=${basedir}/root
 kver=$( make kernelrelease )
 
