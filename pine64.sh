@@ -2,6 +2,12 @@
 # This is the Pine64 Kali ARM64 build script by LSawyer, based on the HardKernel ODROID-c2 script and
 # A trusted Kali Linux image created by Offensive Security - http://www.offensive-security.com
 
+# Things you can change
+
+DEBUG=0			# setting to '1' causes paused alerts at various points in the script
+BUILD_KERNEL=0		# setting to '1' causes the script to build the kernel from source instead of using prebuild kernels
+
+###########################################
 debug() {
     if [ ${DEBUG:-0} -eq 1 ]; then
 	TEXT=${1}
@@ -16,7 +22,6 @@ debug() {
 
 MACHINE_TYPE=`uname -m`
 IMAGE_SIZE=7680
-DEBUG=0
 CWD=$(pwd -P)
 
 if [[ $# -eq 0 ]] ; then
@@ -85,7 +90,7 @@ packages="${arm} ${base} ${desktop} ${tools} ${services} ${extras}"
 architecture="arm64"
 # If you have your own preferred mirrors, set them here.
 # After generating the rootfs, we set the sources.list to the default settings.
-mirror=http.kali.org
+mirror=archive-6.kali.org
 
 # Set this to use an http proxy, like apt-cacher-ng, and uncomment further down
 # to unset it.
@@ -263,7 +268,15 @@ rootp=${device}p2
 debug "creating file systems"
 # Create file systems
 mkfs.vfat $bootp
-mkfs.ext4 -L rootfs $rootp
+
+#workaround
+e4ver=$(mkfs.ext4 -V 2>&1 | grep ^mk | awk '{print $2}' | cut -f1-2 -d. | sed 's/\.//g')
+if [ ${e4ver:-0} -gt 130 ]; then
+	# disable some unnecessary 'features' from mke2fs...
+	mkfs.ext4 -O ^metadata_csum,^64bit,^huge_file,^uninit_bg,^dir_nlink,^extra_isize -L rootfs $rootp
+else
+	mkfs.ext4 -L rootfs $rootp
+fi
 
 # Create the dirs for the partitions and mount them
 mkdir -p ${basedir}/bootp ${basedir}/root
@@ -287,46 +300,52 @@ EOF
 # of space - for the moment, let's build the kernel outside of it, but still
 # keep the sources around for those who want/need to build external modules.
 
-debug "setting up kernel for build"
-# this is held at kernel 3.10, at least until Pine64 is fully mainlined.
-git clone --depth 1 https://github.com/longsleep/linux-pine64 -b pine64-hacks-1.2 ${basedir}/root/usr/src/kernel
-cd ${basedir}/root/usr/src/kernel
-git rev-parse HEAD > ../kernel-at-commit
-touch .scmversion
+if [ ${BUILD_KERNEL:-0} -eq 1 ]
+then
+	debug "setting up kernel for build"
+	# this is held at kernel 3.10, at least until Pine64 is fully mainlined.
+	git clone --depth 1 https://github.com/longsleep/linux-pine64 -b pine64-hacks-1.2 ${basedir}/root/usr/src/kernel
+	cd ${basedir}/root/usr/src/kernel
+	git rev-parse HEAD > ../kernel-at-commit
+	touch .scmversion
 
-if [ ${BUILD_NATIVE:-0} -eq 0 ] ; then
-    export ARCH=arm64
-    export CROSS_COMPILE=aarch64-linux-gnu-
-fi
+	if [ ${BUILD_NATIVE:-0} -eq 0 ] ; then
+	    export ARCH=arm64
+	    export CROSS_COMPILE=aarch64-linux-gnu-
+	fi
 
-patch -p1 --no-backup-if-mismatch < ${basedir}/../patches/kali-wifi-injection-3.12.patch
-# Patches for misc fixes
-patch -p1 --no-backup-if-mismatch < ${basedir}/../patches/pine64-Bluetooth-allocate-static-minor-for-vhci.patch
+	debug "patching kernel for build"
+	patch -p1 --no-backup-if-mismatch < ${basedir}/../patches/kali-wifi-injection-3.12.patch
+	# Patches for misc fixes
+	patch -p1 --no-backup-if-mismatch < ${basedir}/../patches/pine64-Bluetooth-allocate-static-minor-for-vhci.patch
 
-cp ${basedir}/../kernel-configs/pine64.config .config
-cp .config ../pine64.config
-test -e ${basedir}/root/usr/src/kernel/arch/arm64/boot/dts/sun50i-a64-pine64-plus.dts || \
+	cp ${basedir}/../kernel-configs/pine64.config .config
+	cp .config ../pine64.config
+	test -e ${basedir}/root/usr/src/kernel/arch/arm64/boot/dts/sun50i-a64-pine64-plus.dts || \
 		curl -sSL https://github.com/longsleep/build-pine64-image/raw/master/blobs/pine64.dts > \
 		${basedir}/root/usr/src/kernel/arch/arm64/boot/dts/sun50i-a64-pine64-plus.dts
-cp -a ${basedir}/root/usr/src/kernel ${basedir}/
+	cp -a ${basedir}/root/usr/src/kernel ${basedir}/
 
-debug "building kernel"
-cd ${basedir}/kernel/
-make oldconfig
-CPUS=$(grep -c processor /proc/cpuinfo)
-make -j ${CPUS} Image
-make -j ${CPUS} modules
-make -j ${CPUS} dtbs
-make modules_install INSTALL_MOD_PATH=${basedir}/root
-kver=$( make kernelrelease )
+	debug "building kernel"
+	DEBUG=1
+	cd ${basedir}/kernel/
+	make oldconfig
+	CPUS=$(grep -c processor /proc/cpuinfo)
+	make -j ${CPUS} Image
+	make -j ${CPUS} modules
+	debug "building dtbs"
+	make -j ${CPUS} dtbs
+	debug "continuing build and install"
+	make modules_install INSTALL_MOD_PATH=${basedir}/root
+	kver=$( make kernelrelease )
 
-cp arch/arm64/boot/Image ${basedir}/bootp/
-cp arch/arm64/boot/dts/sun50i-a64-*.dtb ${basedir}/bootp/
-cd ${basedir}/root/usr/src/kernel
-make modules_prepare
-cd ${basedir}
+	cp arch/arm64/boot/Image ${basedir}/bootp/
+	cp arch/arm64/boot/dts/sun50i-a64-*.dtb ${basedir}/bootp/
+	cd ${basedir}/root/usr/src/kernel
+	make modules_prepare
+	cd ${basedir}
 
-cat << EOF > ${basedir}/bootp/mkuinitrd
+	cat << EOF > ${basedir}/bootp/mkuinitrd
 #!/bin/bash
 if [ -a /boot/initrd.img-\$(uname -r) ] ; then
     update-initramfs -u -k \$(uname -r)
@@ -336,13 +355,28 @@ fi
 mkimage -A arm64 -O linux -T ramdisk -C none -a 0 -e 0 -n "uInitrd" -d /boot/initrd.img-\$(uname -r) /boot/uInitrd
 EOF
 
-cat << EOF > ${basedir}/bootp/uEnv.txt
+	cat << EOF > ${basedir}/bootp/uEnv.txt
 kernel_filename=Image
 initrd_filename=initrd.img-${kver}
 fdt_filename_prefix=sun50i-a64-
 console=tty0 console=ttyS0,115200n8 no_console_suspend disp.screen0_output_mode=EDID
 optargs=disp.screen0_output_mode=1080p60
 EOF
+else  # using prebuild kernel
+
+	cd ${basedir}/root
+	debug "fetching latest kernel"
+	wget https://www.stdin.xyz/downloads/people/longsleep/pine64-images/linux/linux-pine64-latest.tar.xz
+	debug "unpacking kernel"
+	mount -o bind ${basedir}/bootp ${basedir}/root/boot
+	tar -xpf linux-pine64-latest.tar.xz
+	kver=$(cat ${basedir}/root/boot/Image.version)
+	[[ ! -r ${basedir}/root/boot/uEnv.txt ]] && mv ${basedir}/root/boot/uEnv.txt.in ${basedir}/root/boot/uEnv.txt
+	DEBUG=1
+	debug "about to unmount the boot bind"
+	DEBUG=0 
+	umount ${basedir}/root/boot
+fi
 
 debug "fetching firmware"
 rm -rf ${basedir}/root/lib/firmware
